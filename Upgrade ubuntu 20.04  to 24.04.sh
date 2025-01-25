@@ -1,4 +1,5 @@
 #!/bin/bash
+# make executable: chmod +x script.sh
 
 # upgrade ubuntu 20.04 to 22.04
 sudo apt update
