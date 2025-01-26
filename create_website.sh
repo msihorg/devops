@@ -51,6 +51,7 @@ test_connectivity() {
 
 create_test_html() {
     local env=$1
+    local port=$2
     local protocol="HTTP"
     if [ -f "/etc/letsencrypt/live/$env.$DOMAIN/fullchain.pem" ]; then
         protocol="HTTP/HTTPS"
@@ -70,7 +71,7 @@ create_test_html() {
 </body>
 </html>"
     
-    echo "$test_content" | sudo tee "$BASE_DIR/$env.$DOMAIN/testserver.html"
+    echo "$test_content" | sudo tee "$BASE_DIR/$DOMAIN/$env$port/testserver.html"
 }
 
 create_service_file() {
@@ -197,7 +198,7 @@ for env in dev stage prod; do
    sudo chown www-data:www-data "$BASE_DIR/$DOMAIN/$env$port"
    
    # Create test HTML file
-   create_test_html $env
+   create_test_html $env $port
    
    # Set up configurations
    create_service_file $env $port
