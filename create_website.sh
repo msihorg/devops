@@ -5,6 +5,9 @@ if [ -z "$1" ] || [ -z "$2" ]; then
    exit 1
 fi
 
+# Install required packages
+sudo apt install -y nginx-module-brotli certbot python3-certbot-nginx
+
 DOMAIN="$1"
 APP_NAME="$2"
 BASE_DIR="/var/www"
@@ -29,14 +32,12 @@ test_connectivity() {
     
     echo "Testing connectivity for $domain..."
     
-    # Test HTTP
     if curl -s -o /dev/null -w "%{http_code}" "http://$domain/testserver.html" | grep -q "200"; then
         echo "✓ HTTP connection successful"
     else
         echo "✗ HTTP connection failed"
     fi
     
-    # Test HTTPS if certificate exists
     if [ -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]; then
         if curl -s -o /dev/null -w "%{http_code}" "https://$domain/testserver.html" | grep -q "200"; then
             echo "✓ HTTPS connection successful"
@@ -52,11 +53,6 @@ test_connectivity() {
 create_test_html() {
     local env=$1
     local port=$2
-    local protocol="HTTP"
-    if [ -f "/etc/letsencrypt/live/$env.$DOMAIN/fullchain.pem" ]; then
-        protocol="HTTP/HTTPS"
-    fi
-    
     local test_content="<!DOCTYPE html>
 <html>
 <head>
@@ -64,10 +60,9 @@ create_test_html() {
 </head>
 <body>
     <h1>Test Page for $env.$DOMAIN</h1>
-    <p>If you can see this page, the web server is working correctly over $protocol.</p>
+    <p>If you can see this page, the web server is working correctly.</p>
     <p>Environment: $env</p>
-    <p>Protocol: $protocol</p>
-    <p>Timestamp: $(date)</p>
+    <p>Created on: $(date)</p>
 </body>
 </html>"
     
@@ -106,7 +101,9 @@ proxy_set_header Connection keep-alive;
 proxy_set_header X-Real-IP \$remote_addr;
 proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
 proxy_set_header X-Forwarded-Proto \$scheme;
-proxy_cache_bypass \$http_upgrade;"
+proxy_cache_bypass \$http_upgrade;
+proxy_read_timeout 300;
+proxy_connect_timeout 300;"
 
     echo "$proxy_conf" | sudo tee "/etc/nginx/proxy.conf"
 }
@@ -114,64 +111,100 @@ proxy_cache_bypass \$http_upgrade;"
 create_nginx_config() {
    local env=$1
    local port=$2
-   local ssl_configured=false
    
-   if [ -f "/etc/letsencrypt/live/$env.$DOMAIN/fullchain.pem" ]; then
-       ssl_configured=true
+   # Set rate limits based on environment
+   local rate_limit="30r/s"
+   local burst_limit="60"
+   if [ "$env" = "prod" ]; then
+       rate_limit="10r/s"
+       burst_limit="20"
    fi
-
+   
    create_proxy_conf
 
-   local nginx_content="http {
-    include /etc/nginx/proxy.conf;
-    limit_req_zone \$binary_remote_addr zone=one:10m rate=5r/s;
-    server_tokens off;
-    sendfile on;
-    keepalive_timeout 29;
-    client_body_timeout 10;
-    client_header_timeout 10;
-    send_timeout 10;
+   local nginx_content="
+    load_module modules/ngx_http_brotli_module.so;
 
-  
+    events {
+        worker_connections 10000;
+        use epoll;
+        multi_accept on;
     }
 
-    server {
-        listen 80;
-        server_name $env.$DOMAIN;
+    http {
+        include /etc/nginx/proxy.conf;
+        include mime.types;
+        
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+        server_tokens off;
 
-        location / {
-            root /var/www/$DOMAIN/$env$port;
-            try_files \$uri \$uri/ /index.html =404;
-            proxy_pass http://localhost:$port;
-            limit_req zone=one burst=60 nodelay;
-            include /etc/nginx/proxy.conf;
+        # Brotli Settings
+        brotli on;
+        brotli_comp_level 6;
+        brotli_types application/javascript application/json application/wasm text/css;
+
+        # Gzip Settings
+        gzip on;
+        gzip_vary on;
+        gzip_proxied any;
+        gzip_comp_level 6;
+        gzip_types application/javascript application/json application/wasm text/css;
+
+        # Rate Limiting
+        limit_req_zone \$binary_remote_addr zone=api:10m rate=$rate_limit;
+        
+        server {
+            listen 80;
+            server_name $env.$DOMAIN;
+
+            # Blazor WebAssembly
+            location / {
+                root /var/www/$DOMAIN/$env$port;
+                try_files \$uri \$uri/ /index.html =404;
+                
+                # Cache static files
+                location ~* \.(css|js|wasm)$ {
+                    expires 30d;
+                    add_header Cache-Control \"public, no-transform\";
+                }
+
+                # WebSocket support for SignalR
+                location /_blazor {
+                    proxy_pass http://localhost:$port;
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade \$http_upgrade;
+                    proxy_set_header Connection \"upgrade\";
+                    proxy_cache_bypass \$http_upgrade;
+                }
+            }
+
+            # API endpoints
+            location /api {
+                proxy_pass http://localhost:$port;
+                include /etc/nginx/proxy.conf;
+                limit_req zone=api burst=$burst_limit nodelay;
+                limit_req_status 429;
+            }
+
+            # Health check endpoint
+            location /health {
+                proxy_pass http://localhost:$port;
+                access_log off;
+                include /etc/nginx/proxy.conf;
+            }
+
+            location /testserver.html {
+                root /var/www/$DOMAIN/$env$port;
+            }
+
+            # Security Headers
+            add_header X-Frame-Options SAMEORIGIN;
+            add_header X-Content-Type-Options nosniff;
+            add_header X-XSS-Protection \"1; mode=block\";
+            add_header Content-Security-Policy \"default-src 'self' 'unsafe-inline' 'unsafe-eval'; img-src 'self' data:; connect-src 'self' wss:;\";
         }
-
-        location /testserver.html {
-            root /var/www/$DOMAIN/$env$port;
-            #internal;
-        }"
-
-    if [ "$ssl_configured" = true ]; then
-        nginx_content+="
-        listen 443 ssl http2;
-        listen [::]:443 ssl http2;
-        ssl_certificate /etc/letsencrypt/live/$env.$DOMAIN/fullchain.pem;
-        ssl_certificate_key /etc/letsencrypt/live/$env.$DOMAIN/privkey.pem;
-        ssl_session_timeout 1d;
-        ssl_protocols TLSv1.2 TLSv1.3;
-        ssl_prefer_server_ciphers off;
-        ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
-        ssl_session_cache shared:SSL:10m;
-        ssl_session_tickets off;
-        ssl_stapling off;"
-    fi
-
-    nginx_content+="
-        # Security headers
-        add_header X-Frame-Options SAMEORIGIN;
-        add_header X-Content-Type-Options nosniff;
-        add_header X-XSS-Protection \"1; mode=block\";
     }"
    
    echo "$nginx_content" | sudo tee "/etc/nginx/sites-available/$env.$DOMAIN"
@@ -184,8 +217,6 @@ setup_ssl() {
     local env=$1
     if [ ! -f "/etc/letsencrypt/live/$env.$DOMAIN/fullchain.pem" ]; then
         sudo certbot --nginx -d $env.$DOMAIN
-        # Update Nginx config after SSL setup
-        create_nginx_config $env $port
     fi
 }
 
@@ -193,24 +224,18 @@ for env in dev stage prod; do
    base_var="${env^^}_BASE"
    port=$(get_next_port ${!base_var})
    
-   # Create directory and set permissions
    sudo mkdir -p "$BASE_DIR/$DOMAIN/$env$port"
    sudo chown www-data:www-data "$BASE_DIR/$DOMAIN/$env$port"
    
-   # Create test HTML file
    create_test_html $env $port
-   
-   # Set up configurations
    create_service_file $env $port
    create_nginx_config $env $port
    setup_ssl $env
 done
 
-# Reload services
 sudo systemctl daemon-reload
 sudo nginx -t && sudo systemctl reload nginx
 
-# Start services
 for env in dev stage prod; do
    sudo systemctl enable blazor-$env-$APP_NAME
    sudo systemctl start blazor-$env-$APP_NAME
