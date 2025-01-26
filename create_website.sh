@@ -132,13 +132,25 @@ create_nginx_config() {
     client_header_timeout 10;
     send_timeout 10;
 
-    upstream ${APP_NAME,,}app {
-        server 127.0.0.1:$port;
+  
     }
 
     server {
         listen 80;
-        server_name $env.$DOMAIN;"
+        server_name $env.$DOMAIN;
+
+        location / {
+            root /var/www/$DOMAIN/$env$port;
+            try_files \$uri \$uri/ /index.html =404;
+            proxy_pass http://localhost:$port;
+            limit_req zone=one burst=60 nodelay;
+            include /etc/nginx/proxy.conf;
+        }
+
+        location /testserver.html {
+            root /var/www/$DOMAIN/$env$port;
+            #internal;
+        }"
 
     if [ "$ssl_configured" = true ]; then
         nginx_content+="
@@ -156,23 +168,11 @@ create_nginx_config() {
     fi
 
     nginx_content+="
-    location / {
-        root /var/www/$DOMAIN/$env$port;
-        try_files $uri $uri/ /index.html =404;
-        proxy_pass http://${APP_NAME,,}app:$port;
-        limit_req zone=one burst=60 nodelay;
-    }
-
-    location /testserver.html {
-        root $BASE_DIR/$env.$DOMAIN;
-        internal;
-    }
-
-    # Security headers
-    add_header X-Frame-Options SAMEORIGIN;
-    add_header X-Content-Type-Options nosniff;
-    add_header X-XSS-Protection "1; mode=block";
-}"
+        # Security headers
+        add_header X-Frame-Options SAMEORIGIN;
+        add_header X-Content-Type-Options nosniff;
+        add_header X-XSS-Protection \"1; mode=block\";
+    }"
    
    echo "$nginx_content" | sudo tee "/etc/nginx/sites-available/$env.$DOMAIN"
    if [ ! -f "/etc/nginx/sites-enabled/$env.$DOMAIN" ]; then
