@@ -93,17 +93,56 @@ WantedBy=multi-user.target"
 }
 
 create_proxy_conf() {
-    local proxy_conf="proxy_http_version 1.1;
+    local proxy_conf="# HTTP/2 support
+proxy_http_version 1.1;
+
+# Buffer settings
 proxy_buffering off;
+proxy_buffer_size 128k;
+proxy_buffers 4 256k;
+proxy_busy_buffers_size 256k;
+
+# Header configurations
 proxy_set_header Host \$host;
 proxy_set_header Upgrade \$http_upgrade;
-proxy_set_header Connection keep-alive;
+proxy_set_header Connection 'upgrade';
 proxy_set_header X-Real-IP \$remote_addr;
 proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
 proxy_set_header X-Forwarded-Proto \$scheme;
+proxy_set_header X-Forwarded-Host \$host;
+proxy_set_header X-Forwarded-Port \$server_port;
+
+# Security headers
+proxy_set_header X-Content-Type-Options 'nosniff';
+proxy_set_header X-XSS-Protection '1; mode=block';
+proxy_set_header Referrer-Policy 'strict-origin-when-cross-origin';
+
+# Cache and timeout settings
 proxy_cache_bypass \$http_upgrade;
-proxy_read_timeout 300;
-proxy_connect_timeout 300;"
+proxy_read_timeout 600s;
+proxy_connect_timeout 600s;
+proxy_send_timeout 600s;
+client_max_body_size 50M;
+
+# WebSocket specific settings
+proxy_set_header Connection 'upgrade';
+proxy_cache off;
+proxy_http_version 1.1;
+
+# Compression for better performance
+gzip on;
+gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript application/wasm;
+gzip_min_length 1000;
+gzip_proxied any;
+
+# CORS headers if needed
+#add_header 'Access-Control-Allow-Origin' '*' always;
+#add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS, PUT, DELETE' always;
+#add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization' always;
+
+# Error handling
+proxy_intercept_errors on;
+proxy_next_upstream error timeout http_500 http_502 http_503 http_504;"
 
     echo "$proxy_conf" | sudo tee "/etc/nginx/proxy.conf"
 }
