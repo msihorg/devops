@@ -1,8 +1,8 @@
 #!/bin/bash
 
 if [ -z "$1" ] || [ -z "$2" ]; then
-   echo "Usage: ./create_folders.sh domain.com app_name"
-   exit 1
+    echo "Usage: ./create_folders.sh domain.com app_name"
+    exit 1
 fi
 
 # Install required packages
@@ -16,28 +16,28 @@ STAGE_BASE=3000
 PROD_BASE=4000
 
 get_next_port() {
-   local env_base=$1
-   local max_port=$env_base
-   for port in $(find $BASE_DIR -type d -name "*[0-9]*" | grep -oP "[0-9]+$"); do
-       if (( port > max_port && port < env_base+1000 )); then
-           max_port=$port
-       fi
-   done
-   echo $((max_port+1))
+    local env_base=$1
+    local max_port=$env_base
+    for port in $(find $BASE_DIR -type d -name "*[0-9]*" | grep -oP "[0-9]+$"); do
+        if ((port > max_port && port < env_base + 1000)); then
+            max_port=$port
+        fi
+    done
+    echo $((max_port + 1))
 }
 
 test_connectivity() {
     local env=$1
     local domain="$env.$DOMAIN"
-    
+
     echo "Testing connectivity for $domain..."
-    
+
     if curl -s -o /dev/null -w "%{http_code}" "http://$domain/testserver.html" | grep -q "200"; then
         echo "✓ HTTP connection successful"
     else
         echo "✗ HTTP connection failed"
     fi
-    
+
     if [ -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]; then
         if curl -s -o /dev/null -w "%{http_code}" "https://$domain/testserver.html" | grep -q "200"; then
             echo "✓ HTTPS connection successful"
@@ -65,14 +65,14 @@ create_test_html() {
     <p>Created on: $(date)</p>
 </body>
 </html>"
-    
+
     echo "$test_content" | sudo tee "$BASE_DIR/$DOMAIN/$env$port/testserver.html"
 }
 
 create_service_file() {
-   local env=$1
-   local port=$2
-   local service_content="[Unit]
+    local env=$1
+    local port=$2
+    local service_content="[Unit]
 Description=$APP_NAME $env Environment
 After=network.target
 
@@ -89,7 +89,7 @@ User=www-data
 [Install]
 WantedBy=multi-user.target"
 
-   echo "$service_content" | sudo tee "/etc/systemd/system/blazor-$env-$APP_NAME.service"
+    echo "$service_content" | sudo tee "/etc/systemd/system/blazor-$env-$APP_NAME.service"
 }
 
 create_proxy_conf() {
@@ -109,20 +109,20 @@ proxy_connect_timeout 300;"
 }
 
 create_nginx_config() {
-   local env=$1
-   local port=$2
-   
-   # Set rate limits based on environment
-   local rate_limit="30r/s"
-   local burst_limit="60"
-   if [ "$env" = "prod" ]; then
-       rate_limit="10r/s"
-       burst_limit="20"
-   fi
-   
-   create_proxy_conf
+    local env=$1
+    local port=$2
 
-   local nginx_content="
+    # Set rate limits based on environment
+    local rate_limit="30r/s"
+    local burst_limit="60"
+    if [ "$env" = "prod" ]; then
+        rate_limit="10r/s"
+        burst_limit="20"
+    fi
+
+    create_proxy_conf
+
+    local nginx_content="
     load_module modules/ngx_http_brotli_module.so;
 
     events {
@@ -180,6 +180,19 @@ create_nginx_config() {
                 }
             }
 
+            # For framework files
+            location /_framework {
+                expires 7d;  # More reasonable timeframe
+                add_header Cache-Control "public, must-revalidate";
+            }
+
+            # For WASM files
+            location ~* \.wasm$ {
+                expires 7d;
+                add_header Cache-Control "public, must-revalidate";
+                add_header Content-Type application/wasm;
+            }
+
             # API endpoints
             location /api {
                 proxy_pass http://localhost:$port;
@@ -199,6 +212,25 @@ create_nginx_config() {
                 root /var/www/$DOMAIN/$env$port;
             }
 
+            
+
+            # Allow version query parameters to bypass cache
+            location ~* ^.+\.(css|js|wasm)$ {
+                expires 30d;
+    
+                # Break cache if query string changes
+                add_header Cache-Control "public, no-cache, must-revalidate, proxy-revalidate";
+                if ($args) {
+                    expires -1;
+                }
+            }       
+
+            # Handle versioned files differently
+            location ~* ^.+\.[0-9a-f]{8}\.(css|js|wasm)$ {
+                expires 1y;
+                add_header Cache-Control "public, immutable";
+            }
+
             # Security Headers
             add_header X-Frame-Options SAMEORIGIN;
             add_header X-Content-Type-Options nosniff;
@@ -206,11 +238,11 @@ create_nginx_config() {
             add_header Content-Security-Policy \"default-src 'self' 'unsafe-inline' 'unsafe-eval'; img-src 'self' data:; connect-src 'self' wss:;\";
         }
     }"
-   
-   echo "$nginx_content" | sudo tee "/etc/nginx/sites-available/$env.$DOMAIN"
-   if [ ! -f "/etc/nginx/sites-enabled/$env.$DOMAIN" ]; then
-       sudo ln -s "/etc/nginx/sites-available/$env.$DOMAIN" "/etc/nginx/sites-enabled/"
-   fi
+
+    echo "$nginx_content" | sudo tee "/etc/nginx/sites-available/$env.$DOMAIN"
+    if [ ! -f "/etc/nginx/sites-enabled/$env.$DOMAIN" ]; then
+        sudo ln -s "/etc/nginx/sites-available/$env.$DOMAIN" "/etc/nginx/sites-enabled/"
+    fi
 }
 
 setup_ssl() {
@@ -221,31 +253,31 @@ setup_ssl() {
 }
 
 for env in dev stage prod; do
-   base_var="${env^^}_BASE"
-   port=$(get_next_port ${!base_var})
-   
-   sudo mkdir -p "$BASE_DIR/$DOMAIN/$env$port"
-   sudo chown www-data:www-data "$BASE_DIR/$DOMAIN/$env$port"
-   
-   create_test_html $env $port
-   create_service_file $env $port
-   create_nginx_config $env $port
-   setup_ssl $env
+    base_var="${env^^}_BASE"
+    port=$(get_next_port ${!base_var})
+
+    sudo mkdir -p "$BASE_DIR/$DOMAIN/$env$port"
+    sudo chown www-data:www-data "$BASE_DIR/$DOMAIN/$env$port"
+
+    create_test_html $env $port
+    create_service_file $env $port
+    create_nginx_config $env $port
+    setup_ssl $env
 done
 
 sudo systemctl daemon-reload
 sudo nginx -t && sudo systemctl reload nginx
 
 for env in dev stage prod; do
-   sudo systemctl enable blazor-$env-$APP_NAME
-   sudo systemctl start blazor-$env-$APP_NAME
+    sudo systemctl enable blazor-$env-$APP_NAME
+    sudo systemctl start blazor-$env-$APP_NAME
 done
 
 echo "Setup completed successfully!"
 echo "Created environments:"
 for env in dev stage prod; do
-   base_var="${env^^}_BASE"
-   port=$(get_next_port ${!base_var})
-   echo "$env.$DOMAIN - Port: $port"
-   test_connectivity $env
+    base_var="${env^^}_BASE"
+    port=$(get_next_port ${!base_var})
+    echo "$env.$DOMAIN - Port: $port"
+    test_connectivity $env
 done
