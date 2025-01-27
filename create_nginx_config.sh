@@ -13,6 +13,28 @@ events {
 }
 
 http {
+    # Rate limit zones
+    # Production: More strict limits, larger storage
+    limit_req_zone $binary_remote_addr zone=prod_api:50m rate=10r/s;
+    limit_req_zone $binary_remote_addr zone=prod_global:20m rate=30r/s;
+    
+    # Test: Medium limits
+    limit_req_zone $binary_remote_addr zone=test_api:20m rate=20r/s;
+    limit_req_zone $binary_remote_addr zone=test_global:10m rate=50r/s;
+    
+    # Dev: Relaxed limits, smaller storage
+    limit_req_zone $binary_remote_addr zone=dev_api:10m rate=30r/s;
+    limit_req_zone $binary_remote_addr zone=dev_global:5m rate=100r/s;
+
+    # Shared memory zone for IP blacklisting
+    geo $limit {
+        default 1;
+        # Add your whitelist IPs here
+        10.0.0.0/8 0;
+        192.168.0.0/16 0;
+    }
+    
+
     # HTTP/2 specific settings
     http2_max_field_size 16k;
     http2_max_header_size 32k;
