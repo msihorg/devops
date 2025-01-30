@@ -72,24 +72,6 @@ create_test_html() {
 create_service_file() {
     local env=$1
     local port=$2
-    
-    # Map only ASPNETCORE_ENVIRONMENT value
-    local aspnet_env
-    case "$env" in
-        "dev")
-            aspnet_env="Development"
-            ;;
-        "test")
-            aspnet_env="Staging"
-            ;;
-        "prod")
-            aspnet_env="Production"
-            ;;
-        *)
-            aspnet_env="${env^}"
-            ;;
-    esac
-
     local service_content="[Unit]
 Description=$APP_NAME $env Environment
 After=network.target
@@ -98,7 +80,7 @@ After=network.target
 WorkingDirectory=/var/www/$DOMAIN/$env$port
 ExecStart=/usr/bin/dotnet /var/www/$DOMAIN/$env$port/$APP_NAME.dll
 Environment=ASPNETCORE_URLS=http://localhost:$port
-Environment=ASPNETCORE_ENVIRONMENT=$aspnet_env
+Environment=ASPNETCORE_ENVIRONMENT=${env^}
 Restart=always
 RestartSec=10
 SyslogIdentifier=$APP_NAME-$env
@@ -110,7 +92,6 @@ WantedBy=multi-user.target"
     echo "$service_content" | sudo tee "/etc/systemd/system/blazor-$env-$APP_NAME.service"
 }
 
-:<<'COMMENT'
 create_proxy_conf() {
     local proxy_conf="proxy_http_version 1.1;
 proxy_buffering off;
@@ -126,7 +107,6 @@ proxy_connect_timeout 300;"
 
     echo "$proxy_conf" | sudo tee "/etc/nginx/proxy.conf"
 }
-COMMENT
 
 create_nginx_config() {
     local env=$1
@@ -143,7 +123,7 @@ create_nginx_config() {
     create_proxy_conf
 
     local nginx_content="
-    # /etc/nginx/sites-available/app-${ENV}.conf
+ # /etc/nginx/sites-available/app-${ENV}.conf
 map $http_connection $connection_upgrade {
     "~*Upgrade" $http_connection;
     default keep-alive;
@@ -163,8 +143,6 @@ server {
     # SSL Configuration
     ssl_certificate /etc/nginx/ssl/${ENV}.${DOMAIN}.crt;
     ssl_certificate_key /etc/nginx/ssl/${ENV}.${DOMAIN}.key;
-    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
-    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
 
     # Logging
     access_log /var/log/nginx/${ENV}_access.log combined buffer=512k flush=1m;
@@ -262,7 +240,7 @@ server {
     }
 
     # Versioned static files
-    location ~* "^.+\.[0-9a-f]{8}\.(css|js)$" {
+    location ~* ^.+\.[0-9a-f]{8}\.(css|js|wasm)$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
     }
@@ -277,7 +255,7 @@ server {
 setup_ssl() {
     local env=$1
     if [ ! -f "/etc/letsencrypt/live/$env.$DOMAIN/fullchain.pem" ]; then
-        sudo certbot -d $env.$DOMAIN
+        sudo certbot --nginx -d $env.$DOMAIN
     fi
 }
 
