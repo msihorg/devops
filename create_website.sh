@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ -z "$1" ] || [ -z "$2" ]; then
-    echo "Usage: ./create_folders.sh domain.com app_name"
+    echo "Usage: ./deploy_blazor.sh domain.com app_name"
     exit 1
 fi
 
@@ -29,7 +29,7 @@ get_next_port() {
 get_server_names() {
     local env=$1
     if [ "$env" = "prod" ]; then
-        echo "$DOMAIN www.$DOMAIN"
+        echo "www.$DOMAIN $DOMAIN"
     else
         echo "$env.$DOMAIN"
     fi
@@ -123,6 +123,154 @@ WantedBy=multi-user.target"
     echo "$service_content" | sudo tee "/etc/systemd/system/blazor-$env-$APP_NAME.service"
 }
 
+create_nginx_config() {
+    local env=$1
+    local port=$2
+    local domain=$DOMAIN
+    
+    # Create the configuration directory if it doesn't exist
+    sudo mkdir -p /etc/nginx/sites-available
+    
+    # Define rate limits based on environment
+    local rate_limit="30r/s"
+    local burst_limit="60"
+    case "$env" in
+        "prod")
+            rate_limit="10r/s"
+            burst_limit="20"
+            csp="default-src 'self'; img-src 'self' data: https:; connect-src 'self' wss: https:; upgrade-insecure-requests;"
+            ;;
+        *)
+            csp="default-src 'self' 'unsafe-inline' 'unsafe-eval'; img-src 'self' data: https:; connect-src 'self' wss: https:; upgrade-insecure-requests;"
+            ;;
+    esac
+
+    # Create the Nginx configuration
+    cat << EOF | sudo tee "/etc/nginx/sites-available/$env.$domain"
+
+# WebSocket upgrade mapping
+map \$http_connection \$connection_upgrade {
+    "~*Upgrade" \$http_connection;
+    default keep-alive;
+}
+
+# HTTP redirect to HTTPS
+server {
+    listen 80;
+    server_name $(get_server_names $env);
+    
+    location / {
+        return 301 https://\$server_name\$request_uri;
+    }
+}
+
+# HTTPS server
+server {
+    listen 443 ssl http2;
+    server_name $(get_server_names $env);
+    root /var/www/$domain/$env$port;
+
+    # SSL Configuration
+    ssl_certificate /etc/letsencrypt/live/$([ "$env" = "prod" ] && echo "www.$domain" || echo "$env.$domain")/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$([ "$env" = "prod" ] && echo "www.$domain" || echo "$env.$domain")/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+    add_header Content-Security-Policy "$csp" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+
+    # Logging
+    access_log /var/log/nginx/${env}.${domain}_access.log combined buffer=512k flush=1m;
+    error_log /var/log/nginx/${env}.${domain}_error.log warn;
+
+    # Blazor framework files
+    location /_framework {
+        expires 7d;
+        add_header Cache-Control "public, must-revalidate, max-age=604800";
+    }
+
+    # WASM files
+    location ~* \.wasm$ {
+        expires 7d;
+        add_header Cache-Control "public, must-revalidate, max-age=604800";
+        add_header Content-Type "application/wasm";
+    }
+
+    # API endpoints with rate limiting
+    location /api {
+        proxy_pass http://localhost:$port;
+        include /etc/nginx/proxy.conf;
+        
+        limit_req zone=${env}_api burst=$burst_limit nodelay;
+        limit_req_status 429;
+        
+        error_page 429 /rate_limit.html;
+    }
+
+    # SignalR/WebSocket endpoint
+    location /_blazor {
+        proxy_pass http://localhost:$port;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
+        proxy_read_timeout 300s;
+    }
+
+    # Health checks
+    location /health {
+        proxy_pass http://localhost:$port/health;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        access_log off;
+        proxy_cache off;
+    }
+
+    # Development tools (only in non-prod environments)
+    location /swagger {
+        $([ "$env" = "prod" ] && echo "return 404;" || echo "")
+        proxy_pass http://localhost:$port;
+        include /etc/nginx/proxy.conf;
+    }
+
+    # Static files with versioning
+    location ~* \.(css|js|jpg|jpeg|png|gif|ico|svg)$ {
+        expires 30d;
+        add_header Cache-Control "public, no-transform, max-age=2592000";
+        try_files \$uri =404;
+    }
+
+    # Versioned static files (immutable content)
+    location ~* '^.+\.[0-9a-f]{8}\.(css|js)$'{
+        expires 1y;
+        add_header Cache-Control "public, immutable, max-age=31536000";
+        try_files \$uri =404;
+    }
+
+    # Root location
+    location / {
+        try_files \$uri \$uri/ /index.html;
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+    }
+}
+EOF
+
+    # Create symbolic link if it doesn't exist
+    if [ ! -f "/etc/nginx/sites-enabled/$env.$domain" ]; then
+        sudo ln -s "/etc/nginx/sites-available/$env.$domain" "/etc/nginx/sites-enabled/"
+    fi
+
+    # Verify the configuration
+    sudo nginx -t
+}
+
 setup_ssl() {
     local env=$1
     local server_names=$(get_server_names $env)
@@ -190,9 +338,11 @@ EOF
     fi
 }
 
+# Main execution starts here
 # Create necessary directories
 sudo mkdir -p /var/www/certbot
 sudo mkdir -p /etc/nginx/ssl
+sudo mkdir -p /etc/nginx/conf.d
 
 # Create proxy.conf
 create_proxy_conf
@@ -229,19 +379,3 @@ echo -e "\nCreated environments:"
 for env in dev stage prod; do
     base_var="${env^^}_BASE"
     port=$(get_next_port ${!base_var})
-    
-    if [ "$env" = "prod" ]; then
-        echo "$DOMAIN and www.$DOMAIN - Port: $port"
-    else
-        echo "$env.$DOMAIN - Port: $port"
-    fi
-    
-    test_connectivity $env
-done
-
-echo -e "\nImportant next steps:"
-echo "1. Update your DNS records to point to this server"
-echo "2. Deploy your application files to the appropriate directories"
-echo "3. Check the logs if you encounter any issues:"
-echo "   - Nginx logs: /var/log/nginx/"
-echo "   - Application logs: journalctl -u blazor-*"
