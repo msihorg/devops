@@ -1,15 +1,21 @@
 #!/bin/bash
 
-if [ -z "$1" ] || [ -z "$2" ]; then
+if [ -z "$1" ]; then
     echo "Usage: ./deploy_blazor.sh domain.com app_name"
     exit 1
+fi
+
+DOMAIN="$1"
+APP_NAME="$2"
+
+if [ -z "$2" ]; then
+    DOMAIN="$1.org"
 fi
 
 # Install required packages
 sudo apt install -y certbot python3-certbot-nginx
 
-DOMAIN="$1"
-APP_NAME="$2"
+
 BASE_DIR="/var/www"
 DEV_BASE=2000
 STAGE_BASE=3000
@@ -123,7 +129,43 @@ WantedBy=multi-user.target"
     echo "$service_content" | sudo tee "/etc/systemd/system/blazor-$env-$APP_NAME.service"
 }
 
-create_nginx_config() {
+create_basic_nginx_config() {
+    local env=$1
+    local port=$2
+    local domain=$DOMAIN
+    
+    # Create the configuration directory if it doesn't exist
+    sudo mkdir -p /etc/nginx/sites-available
+    
+    # Create the basic Nginx configuration (HTTP only)
+    cat << EOF | sudo tee "/etc/nginx/sites-available/$env.$domain"
+server {
+    listen 80;
+    server_name $(get_server_names $env);
+    
+    # Root directory
+    root /var/www/$domain/$env$port;
+    
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+}
+EOF
+
+    # Create symbolic link if it doesn't exist
+    if [ ! -f "/etc/nginx/sites-enabled/$env.$domain" ]; then
+        sudo ln -s "/etc/nginx/sites-available/$env.$domain" "/etc/nginx/sites-enabled/"
+    fi
+
+    # Verify the configuration
+    sudo nginx -t
+}
+
+create_ssl_nginx_config() {
     local env=$1
     local port=$2
     local domain=$DOMAIN
@@ -158,6 +200,10 @@ map \$http_connection \$connection_upgrade {
 server {
     listen 80;
     server_name $(get_server_names $env);
+    
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
     
     location / {
         return 301 https://\$server_name\$request_uri;
@@ -235,7 +281,7 @@ server {
 
     # Development tools (only in non-prod environments)
     location /swagger {
-        $([ "$env" = "prod" ] && echo "return 404;" || echo "")
+       $([ "$env" = "prod" ] && echo "return 404;" || echo "")
         proxy_pass http://localhost:$port;
         include /etc/nginx/proxy.conf;
     }
@@ -248,7 +294,7 @@ server {
     }
 
     # Versioned static files (immutable content)
-    location ~* '^.+\.[0-9a-f]{8}\.(css|js)$'{
+    location ~* '^.+\.[0-9a-f]{8}\.(css|js)$' {
         expires 1y;
         add_header Cache-Control "public, immutable, max-age=31536000";
         try_files \$uri =404;
@@ -257,8 +303,14 @@ server {
     # Root location
     location / {
         try_files \$uri \$uri/ /index.html;
-        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        proxy_pass http://localhost:$port;
+        include /etc/nginx/proxy.conf;
     }
+
+    location /testserver.html {
+        root /var/www/$DOMAIN/$env$port;
+        #internal;
+    }        
 }
 EOF
 
@@ -283,12 +335,12 @@ setup_ssl() {
     
     if [ "$env" = "prod" ]; then
         # For production, check both www and naked domain
-        if [ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+        if [ ! -f "/etc/letsencrypt/live/$domain/fullchain.pem" ]; then
             sudo certbot certonly --nginx $domain_args
         fi
     else
         # For other environments, check the subdomain
-        if [ ! -f "/etc/letsencrypt/live/$env.$DOMAIN/fullchain.pem" ]; then
+        if [ ! -f "/etc/letsencrypt/live/$env.$domain/fullchain.pem" ]; then
             sudo certbot certonly --nginx $domain_args
         fi
     fi
@@ -347,7 +399,7 @@ sudo mkdir -p /etc/nginx/conf.d
 # Create proxy.conf
 create_proxy_conf
 
-# Deploy each environment
+# Deploy each environment - First Phase (HTTP only)
 for env in dev stage prod; do
     base_var="${env^^}_BASE"
     port=$(get_next_port ${!base_var})
@@ -356,12 +408,17 @@ for env in dev stage prod; do
     sudo mkdir -p "$BASE_DIR/$DOMAIN/$env$port"
     sudo chown -R www-data:www-data "$BASE_DIR/$DOMAIN/$env$port"
     
-    # Create configuration files
+    # Create basic configuration files
     create_test_html $env $port
     create_service_file $env $port
-    create_nginx_config $env $port
+    create_basic_nginx_config $env $port
+    sudo nginx -t && sudo systemctl reload nginx
     setup_ssl $env
+    create_ssl_nginx_config $env $port
 done
+
+# Reload Nginx to apply basic configs
+sudo nginx -t && sudo systemctl reload nginx
 
 # Reload services
 sudo systemctl daemon-reload
@@ -379,3 +436,20 @@ echo -e "\nCreated environments:"
 for env in dev stage prod; do
     base_var="${env^^}_BASE"
     port=$(get_next_port ${!base_var})
+    
+    if [ "$env" = "prod" ]; then
+        echo "$DOMAIN and www.$DOMAIN - Port: $port"
+    else
+        echo "$env.$DOMAIN - Port: $port"
+    fi
+    echo "https://$env.$DOMAIN/testserver.html"
+    test_connectivity $env
+done
+
+echo -e "\nImportant next steps:"
+echo "1. Update your DNS records to point to this server"
+echo "2. Deploy your application files to the appropriate directories"
+echo "3. Check the logs if you encounter any issues:"
+echo "   - Nginx logs: /var/log/nginx/"
+echo "   - Application logs: journalctl -u blazor-*"
+

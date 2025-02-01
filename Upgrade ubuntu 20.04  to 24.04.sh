@@ -13,3 +13,8 @@ sudo apt update
 sudo apt upgrade
 sudo apt install ubuntu-release-upgrader-core
 cat /etc/os-release
+
+
+#cleanup nginx website configs
+sudo rm /etc/nginx/sites-available/*
+sudo rm /etc/nginx/sites-enabled/*

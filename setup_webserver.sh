@@ -13,7 +13,10 @@ sudo apt-get install -y dotnet-sdk-9.0
 sudo apt install nginx -y
 sudo systemctl start nginx
 sudo systemctl enable nginx
+sudo systemctl status nginx
+sudo systemctl restatus nginx
 
 # update firewall
 sudo ufw allow from x.x.x.x/y to any port 80
 sudo ufw allow from x.x.x.x/y to any port 443
+
